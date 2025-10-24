@@ -21,7 +21,6 @@ class PresetStore:
         data = self._load_all()
         data[name] = {
             "pitch": float(preset_dict.get("pitch", 0)),
-            "robot": float(preset_dict.get("robot", 0)),
             "reverb": float(preset_dict.get("reverb", 0)),
         }
         self._save_all(data)

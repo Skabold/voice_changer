@@ -1,7 +1,6 @@
 {
-  "test 4 pitch": {
-    "pitch": 4.0,
-    "robot": 0.0,
-    "reverb": 0.0
+  "test": {
+    "pitch": -6.0,
+    "reverb": 6.0
   }
 }

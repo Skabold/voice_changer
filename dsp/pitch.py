@@ -1,6 +1,6 @@
 # dsp/pitch.py
 import numpy as np
-from math import gcd
+from math import gcd, exp
 from scipy.signal import resample_poly
 
 
@@ -28,48 +28,65 @@ class PitchShifter:
     """
     Low-latency pitch shift using resample_poly + short crossfade between blocks.
     Positive semitones -> higher pitch (by resampling with 1/factor).
+    Internally smooths target semitones over a time constant to avoid zipper/clicks.
     """
 
-    def __init__(self, crossfade: int = 128):
-        self.semitones = 0.0
+    def __init__(
+        self, crossfade: int = 128, sample_rate: int = 44100, smooth_ms: float = 35.0
+    ):
         self.crossfade = int(max(0, crossfade))
+        self.sr = int(sample_rate)
+        self.tau = max(1e-3, smooth_ms / 1000.0)  # smoothing time constant
+        self.target = 0.0
+        self.current = 0.0
         self._tail = np.zeros(0, dtype=np.float32)
 
     def set_semitones(self, semis: float):
-        self.semitones = float(semis)
+        # just set target; we’ll converge in process_block
+        self.target = float(np.clip(semis, -24.0, 24.0))
+
+    def _update_current(self, n_samples: int):
+        # exponential convergence over block length
+        alpha = 1.0 - exp(-float(n_samples) / (self.tau * self.sr))
+        self.current += alpha * (self.target - self.current)
 
     def process_block(self, x: np.ndarray) -> np.ndarray:
         x = x.astype(np.float32, copy=False)
+        n = len(x)
 
-        if abs(self.semitones) < 1e-6:
+        # update smoothed semitone value for this block
+        self._update_current(n)
+        semis = self.current
+
+        if abs(semis) < 1e-6:
             # smooth exit if a tail existed
             if self._tail.size > 0 and self.crossfade > 0:
-                n = min(len(x), self._tail.size, self.crossfade)
-                if n > 0:
-                    w = np.linspace(1.0, 0.0, n, dtype=np.float32)
-                    x[:n] = x[:n] * (1 - w) + self._tail[:n] * w
+                m = min(n, self._tail.size, self.crossfade)
+                if m > 0:
+                    w = np.linspace(1.0, 0.0, m, dtype=np.float32)
+                    x[:m] = x[:m] * (1 - w) + self._tail[:m] * w
             self._tail = np.zeros(0, dtype=np.float32)
             return x
 
-        # Correct mapping: pitch factor = 2^(semitones/12); resample by 1/factor
-        factor = 2.0 ** (self.semitones / 12.0)
-        resample_factor = 1.0 / factor  # <-- FIX
-        up, down = _ratio_from_factor(resample_factor)  # <-- FIX
+        # pitch factor and correct resample mapping
+        factor = 2.0 ** (semis / 12.0)
+        resample_factor = 1.0 / factor
+        up, down = _ratio_from_factor(resample_factor)
 
         y = resample_poly(x, up, down, window=("kaiser", 5.0)).astype(np.float32)
 
         # match length back to block size (stable latency)
-        if len(y) < len(x):
-            y = np.pad(y, (0, len(x) - len(y)))
+        if len(y) < n:
+            y = np.pad(y, (0, n - len(y)))
         else:
-            y = y[: len(x)]
+            y = y[:n]
 
         # short crossfade to hide block edges
         if self._tail.size > 0 and self.crossfade > 0:
-            n = min(len(y), self._tail.size, self.crossfade)
-            if n > 0:
-                w = np.linspace(1.0, 0.0, n, dtype=np.float32)
-                y[:n] = y[:n] * (1 - w) + self._tail[:n] * w
+            m = min(len(y), self._tail.size, self.crossfade)
+            if m > 0:
+                w = np.linspace(1.0, 0.0, m, dtype=np.float32)
+                y[:m] = y[:m] * (1 - w) + self._tail[:m] * w
 
         self._tail = (
             y[-self.crossfade :].copy()

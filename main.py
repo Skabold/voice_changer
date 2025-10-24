@@ -29,7 +29,6 @@ class App(tk.Tk):
         self.enable_processing = tk.BooleanVar(value=True)
         self.monitoring = tk.BooleanVar(value=True)
         self.pitch = tk.DoubleVar(value=0.0)
-        self.robot = tk.DoubleVar(value=0.0)
         self.reverb = tk.DoubleVar(value=0.0)
         self.status = tk.StringVar(value="Idle")
 
@@ -66,7 +65,6 @@ class App(tk.Tk):
 
         # Sliders
         self._add_slider(frm, "Pitch (semitones)", self.pitch, -12, 12, 0.5, row=4)
-        self._add_slider(frm, "Robot amount", self.robot, 0, 1, 0.05, row=5)
         self._add_slider(frm, "Reverb amount", self.reverb, 0, 1, 0.05, row=6)
 
         ttk.Checkbutton(
@@ -176,7 +174,6 @@ class App(tk.Tk):
             name,
             {
                 "pitch": float(self.pitch.get()),
-                "robot": float(self.robot.get()),
                 "reverb": float(self.reverb.get()),
             },
         )
@@ -193,7 +190,6 @@ class App(tk.Tk):
         if name and name in names:
             data = self.presets.load(name)
             self.pitch.set(float(data.get("pitch", 0)))
-            self.robot.set(float(data.get("robot", 0)))
             self.reverb.set(float(data.get("reverb", 0)))
             self.status.set(f"Loaded preset '{name}'")
 
@@ -202,7 +198,6 @@ class App(tk.Tk):
         self.processor.set_params(
             enabled=bool(self.enable_processing.get()),
             pitch_semitones=float(self.pitch.get()),
-            robot=float(self.robot.get()),
             reverb=float(self.reverb.get()),
         )
         self.engine.set_monitoring(bool(self.monitoring.get()))
