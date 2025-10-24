@@ -1,132 +1,214 @@
-import PySimpleGUI as sg
-import numpy as np
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog  # simpledialog needed
 from audio.engine import AudioEngine, list_devices
 from dsp.processor import Processor
 from config.presets import PresetStore
-from utils.logger import log
 
-# ------- GUI helpers -------
-def build_window(devices):
-    in_names = [f"{d['index']}: {d['name']}" for d in devices if d['max_input_channels'] > 0]
-    out_names = [f"{d['index']}: {d['name']}" for d in devices if d['max_output_channels'] > 0]
-
-    layout = [
-        [sg.Text('Voice Changer Live', font=('Segoe UI', 14, 'bold'))],
-        [sg.HorizontalSeparator()],
-        [sg.Text('Input device', size=(12,1)), sg.Combo(in_names, key='-IN-', size=(60,1))],
-        [sg.Text('Output device', size=(12,1)), sg.Combo(out_names, key='-OUT-', size=(60,1))],
-        [sg.Button('Refresh devices', key='-REFRESH-')],
-        [sg.HorizontalSeparator()],
-        [sg.Text('Pitch (semitones)', size=(16,1)), sg.Slider(range=(-12,12), default_value=0, resolution=0.5, orientation='h', key='-PITCH-', size=(40,15)), sg.Text('0', key='-PVAL-')],
-        [sg.Text('Robot amount', size=(16,1)), sg.Slider(range=(0,1), default_value=0.0, resolution=0.05, orientation='h', key='-ROBOT-', size=(40,15)), sg.Text('0', key='-RVAL-')],
-        [sg.Text('Reverb amount', size=(16,1)), sg.Slider(range=(0,1), default_value=0.0, resolution=0.05, orientation='h', key='-REVERB-', size=(40,15)), sg.Text('0', key='-REVVAL-')],
-        [sg.Checkbox('Enable processing', key='-PROCESS-', default=True), sg.Checkbox('Hear myself (monitor)', key='-MONITOR-', default=True)],
-        [sg.HorizontalSeparator()],
-        [sg.Button('Start', key='-START-', button_color=('white','#2e7d32')), sg.Button('Stop', key='-STOP-', button_color=('white','#c62828')), sg.Push(),
-         sg.Button('Save preset', key='-SAVE-'), sg.Button('Load preset', key='-LOAD-')],
-        [sg.StatusBar('Idle', key='-STATUS-')]
-    ]
-    return sg.Window('Voice Changer Live', layout, finalize=True)
+APP_TITLE = "Voice Changer Live (Tkinter)"
+SR = 44100
+BS = 4096
 
 
-def get_selected_index(combo_val):
-    if not combo_val:
-        return None
-    try:
-        return int(str(combo_val).split(':', 1)[0])
-    except Exception:
-        return None
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(APP_TITLE)
+        self.resizable(False, False)
 
-
-if __name__ == '__main__':
-    sg.theme('DarkBlue3')
-
-    # Presets
-    presets = PresetStore('presets.json')
-
-    # DSP Processor (thread-safe config via set_params)
-    processor = Processor(sample_rate=44100, block_size=1024)
-
-    # Audio engine (streams)
-    devices = list_devices()
-    window = build_window(devices)
-    engine = AudioEngine(processor=processor)
-
-    # Try select defaults
-    try:
-        # Choose first available in/out by default
-        ins = [x for x in devices if x['max_input_channels']>0]
-        outs = [x for x in devices if x['max_output_channels']>0]
-        if ins:
-            window['-IN-'].update(value=f"{ins[0]['index']}: {ins[0]['name']}")
-        if outs:
-            window['-OUT-'].update(value=f"{outs[0]['index']}: {outs[0]['name']}")
-    except Exception:
-        pass
-
-    while True:
-        event, values = window.read(timeout=50)
-        if event == sg.WIN_CLOSED:
-            break
-
-        # Live update labels
-        window['-PVAL-'].update(f"{values['-PITCH-']:.1f}")
-        window['-RVAL-'].update(f"{values['-ROBOT-']:.2f}")
-        window['-REVVAL-'].update(f"{values['-REVERB-']:.2f}")
-
-        # Push params to DSP (engine callback will read atomically)
-        processor.set_params(
-            enabled=values['-PROCESS-'],
-            pitch_semitones=float(values['-PITCH-']),
-            robot=float(values['-ROBOT-']),
-            reverb=float(values['-REVERB-'])
+        # Core
+        self.processor = Processor(sample_rate=SR, block_size=BS)
+        self.engine = AudioEngine(
+            processor=self.processor, sample_rate=SR, block_size=BS
         )
-        engine.set_monitoring(values['-MONITOR-'])
+        self.presets = PresetStore("presets.json")
 
-        if event == '-REFRESH-':
-            devices = list_devices()
-            in_names = [f"{d['index']}: {d['name']}" for d in devices if d['max_input_channels'] > 0]
-            out_names = [f"{d['index']}: {d['name']}" for d in devices if d['max_output_channels'] > 0]
-            window['-IN-'].update(values=in_names)
-            window['-OUT-'].update(values=out_names)
-            window['-STATUS-'].update('Devices refreshed')
+        # UI state
+        self.devices = list_devices()
+        self.in_choice = tk.StringVar()
+        self.out_choice = tk.StringVar()
+        self.enable_processing = tk.BooleanVar(value=True)
+        self.monitoring = tk.BooleanVar(value=True)
+        self.pitch = tk.DoubleVar(value=0.0)
+        self.robot = tk.DoubleVar(value=0.0)
+        self.reverb = tk.DoubleVar(value=0.0)
+        self.status = tk.StringVar(value="Idle")
 
-        elif event == '-START-':
-            in_idx = get_selected_index(values['-IN-'])
-            out_idx = get_selected_index(values['-OUT-'])
-            try:
-                engine.start(input_device=in_idx, output_device=out_idx)
-                window['-STATUS-'].update('Running…')
-            except Exception as e:
-                sg.popup_error('Failed to start audio', str(e))
-                window['-STATUS-'].update('Error starting')
+        self._build_ui()
+        self._populate_devices()
+        self._tick()  # periodic sync with DSP
 
-        elif event == '-STOP-':
-            engine.stop()
-            window['-STATUS-'].update('Stopped')
+    # ---------- UI ----------
+    def _build_ui(self):
+        pad = {"padx": 10, "pady": 6}
 
-        elif event == '-SAVE-':
-            name = sg.popup_get_text('Preset name:')
-            if name:
-                presets.save(name, {
-                    'pitch': float(values['-PITCH-']),
-                    'robot': float(values['-ROBOT-']),
-                    'reverb': float(values['-REVERB-'])
-                })
-                window['-STATUS-'].update(f"Saved preset '{name}'")
+        frm = ttk.Frame(self)
+        frm.grid(row=0, column=0, sticky="nsew")
 
-        elif event == '-LOAD-':
-            names = presets.list_names()
-            if not names:
-                sg.popup('No presets saved yet')
-            else:
-                name = sg.popup_get_text('Type preset name to load:\n' + '\n'.join(names))
-                if name and name in names:
-                    data = presets.load(name)
-                    window['-PITCH-'].update(value=float(data.get('pitch',0)))
-                    window['-ROBOT-'].update(value=float(data.get('robot',0)))
-                    window['-REVERB-'].update(value=float(data.get('reverb',0)))
-                    window['-STATUS-'].update(f"Loaded preset '{name}'")
+        ttk.Label(frm, text="Input device").grid(row=0, column=0, sticky="w", **pad)
+        self.in_combo = ttk.Combobox(
+            frm, textvariable=self.in_choice, width=60, state="readonly"
+        )
+        self.in_combo.grid(row=0, column=1, **pad)
 
-    engine.stop()
-    window.close()
+        ttk.Label(frm, text="Output device").grid(row=1, column=0, sticky="w", **pad)
+        self.out_combo = ttk.Combobox(
+            frm, textvariable=self.out_choice, width=60, state="readonly"
+        )
+        self.out_combo.grid(row=1, column=1, **pad)
+
+        ttk.Button(frm, text="Refresh devices", command=self._refresh_devices).grid(
+            row=2, column=1, sticky="e", **pad
+        )
+
+        ttk.Separator(frm, orient="horizontal").grid(
+            row=3, column=0, columnspan=2, sticky="ew", padx=10
+        )
+
+        # Sliders
+        self._add_slider(frm, "Pitch (semitones)", self.pitch, -12, 12, 0.5, row=4)
+        self._add_slider(frm, "Robot amount", self.robot, 0, 1, 0.05, row=5)
+        self._add_slider(frm, "Reverb amount", self.reverb, 0, 1, 0.05, row=6)
+
+        ttk.Checkbutton(
+            frm, text="Enable processing", variable=self.enable_processing
+        ).grid(row=7, column=0, sticky="w", **pad)
+        ttk.Checkbutton(
+            frm, text="Hear myself (monitor)", variable=self.monitoring
+        ).grid(row=7, column=1, sticky="w", **pad)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=8, column=0, columnspan=2, sticky="ew")
+        ttk.Button(btns, text="Start", command=self._start).grid(
+            row=0, column=0, padx=5, pady=6
+        )
+        ttk.Button(btns, text="Stop", command=self._stop).grid(
+            row=0, column=1, padx=5, pady=6
+        )
+        ttk.Button(btns, text="Save preset", command=self._save_preset).grid(
+            row=0, column=2, padx=5, pady=6
+        )
+        ttk.Button(btns, text="Load preset", command=self._load_preset).grid(
+            row=0, column=3, padx=5, pady=6
+        )
+
+        ttk.Label(frm, textvariable=self.status).grid(
+            row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(4, 10)
+        )
+
+    def _add_slider(self, parent, label, var, mn, mx, res, row):
+        frm = ttk.Frame(parent)
+        frm.grid(row=row, column=0, columnspan=2, sticky="ew", padx=10, pady=6)
+        ttk.Label(frm, text=label, width=18).grid(row=0, column=0, sticky="w")
+        s = tk.Scale(
+            frm,
+            from_=mn,
+            to=mx,
+            resolution=res,
+            orient="horizontal",
+            variable=var,
+            length=360,
+        )
+        s.grid(row=0, column=1, sticky="ew")
+        val_lbl = ttk.Label(frm, text=f"{var.get():.2f}")
+        val_lbl.grid(row=0, column=2, padx=6)
+
+        def on_change(*_):
+            val_lbl.configure(text=f"{var.get():.2f}")
+
+        var.trace_add("write", on_change)
+
+    # ---------- Devices ----------
+    def _device_label(self, d: dict) -> str:
+        """Builds a safe label even if hostapi_name is missing."""
+        api = d.get("hostapi_name")
+        if api is None:
+            # fall back to numeric hostapi index or 'Unknown'
+            hv = d.get("hostapi")
+            api = f"hostapi {hv}" if isinstance(hv, int) else "Unknown"
+        idx = d.get("index", -1)
+        name = d.get("name", "Device")
+        return f"{idx}: [{api}] {name}"
+
+    def _populate_devices(self):
+        ins = [d for d in self.devices if d.get("max_input_channels", 0) > 0]
+        outs = [d for d in self.devices if d.get("max_output_channels", 0) > 0]
+        in_names = [self._device_label(d) for d in ins]
+        out_names = [self._device_label(d) for d in outs]
+        self.in_combo["values"] = in_names
+        self.out_combo["values"] = out_names
+        if in_names:
+            self.in_choice.set(in_names[0])
+        if out_names:
+            self.out_choice.set(out_names[0])
+
+    def _refresh_devices(self):
+        self.devices = list_devices()
+        self._populate_devices()
+        self.status.set("Devices refreshed")
+
+    # ---------- Engine control ----------
+    def _parse_index(self, s):
+        try:
+            return int(str(s).split(":", 1)[0])
+        except Exception:
+            return None
+
+    def _start(self):
+        in_idx = self._parse_index(self.in_choice.get())
+        out_idx = self._parse_index(self.out_choice.get())
+        try:
+            self.engine.start(input_device=in_idx, output_device=out_idx)
+            self.status.set("Running…")
+        except Exception as e:
+            messagebox.showerror("Audio error", str(e))
+            self.status.set("Error starting")
+
+    def _stop(self):
+        self.engine.stop()
+        self.status.set("Stopped")
+
+    # ---------- Presets ----------
+    def _save_preset(self):
+        name = simpledialog.askstring("Save Preset", "Preset name:")
+        if not name:
+            return
+        self.presets.save(
+            name,
+            {
+                "pitch": float(self.pitch.get()),
+                "robot": float(self.robot.get()),
+                "reverb": float(self.reverb.get()),
+            },
+        )
+        self.status.set(f"Saved preset '{name}'")
+
+    def _load_preset(self):
+        names = self.presets.list_names()
+        if not names:
+            messagebox.showinfo("Presets", "No presets saved yet.")
+            return
+        name = simpledialog.askstring(
+            "Load Preset", "Type one of:\n" + "\n".join(names)
+        )
+        if name and name in names:
+            data = self.presets.load(name)
+            self.pitch.set(float(data.get("pitch", 0)))
+            self.robot.set(float(data.get("robot", 0)))
+            self.reverb.set(float(data.get("reverb", 0)))
+            self.status.set(f"Loaded preset '{name}'")
+
+    # ---------- Periodic sync ----------
+    def _tick(self):
+        self.processor.set_params(
+            enabled=bool(self.enable_processing.get()),
+            pitch_semitones=float(self.pitch.get()),
+            robot=float(self.robot.get()),
+            reverb=float(self.reverb.get()),
+        )
+        self.engine.set_monitoring(bool(self.monitoring.get()))
+        self.after(50, self._tick)
+
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()

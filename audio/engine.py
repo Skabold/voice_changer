@@ -5,8 +5,12 @@ from utils.logger import log
 
 def list_devices():
     infos = sd.query_devices()
-    # Attach index explicitly
-    return [dict(index=i, **d) for i, d in enumerate(infos)]
+    out = []
+    for i, d in enumerate(infos):
+        dd = dict(d)  # copy
+        dd.setdefault("index", i)  # only set if missing
+        out.append(dd)
+    return out
 
 
 class AudioEngine:
@@ -24,7 +28,11 @@ class AudioEngine:
         if status:
             log(f"Audio status: {status}")
         # Mono only for now; duplicate to output channels if needed
-        mono = indata[:, 0].copy() if indata.shape[1] > 0 else np.zeros(frames, dtype=np.float32)
+        mono = (
+            indata[:, 0].copy()
+            if indata.shape[1] > 0
+            else np.zeros(frames, dtype=np.float32)
+        )
         if self.monitor:
             processed = self.processor.process_block(mono)
         else:
@@ -40,7 +48,7 @@ class AudioEngine:
         self.stream = sd.Stream(
             samplerate=self.sample_rate,
             blocksize=self.block_size,
-            dtype='float32',
+            dtype="float32",
             channels=1,
             callback=self._callback,
             device=(input_device, output_device),
